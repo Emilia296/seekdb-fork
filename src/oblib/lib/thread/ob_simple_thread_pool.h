@@ -125,7 +125,6 @@ private:
   void destroy_workers(WorkerList &workers);
 
   std::atomic<bool> is_inited_;
-  // Stop closes admission; low bits pair every entry with its release.
   std::atomic<uint64_t> lifecycle_;
   T queue_;
   lib::IRunWrapper *run_wrapper_;

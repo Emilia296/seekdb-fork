@@ -245,7 +245,6 @@ void ObSimpleThreadPoolBase<T>::wait()
     workers.push_back_range(workers_);
   }
   destroy_workers(workers);
-  // A stopped expansion can leave accepted tasks with no worker to drain them.
   QElemType *task = nullptr;
   while (OB_SUCCESS == queue_.pop(task)) {
     handle_drop(static_cast<TaskType *>(task));
