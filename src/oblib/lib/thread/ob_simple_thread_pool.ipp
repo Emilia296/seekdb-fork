@@ -30,7 +30,7 @@ namespace common
 template <class T>
 ObSimpleThreadPoolBase<T>::ObSimpleThreadPoolBase()
     : ObSimpleDynamicThreadPool(),
-      is_inited_(false), lifecycle_(0),
+      is_inited_(false), lifecycle_(),
       run_wrapper_(nullptr),
       cur_worker_idx_(0)
 {
@@ -57,7 +57,7 @@ int ObSimpleThreadPoolBase<T>::init(
   } else if (OB_FAIL(queue_.init(task_num_limit, name))) {
   } else {
     is_inited_ = true;
-    lifecycle_.store(0, std::memory_order_release);
+    lifecycle_.reset();
     name_ = name;
     
     if (max_thread_cnt_ < 0) {
@@ -91,11 +91,12 @@ template <class T>
 int ObSimpleThreadPoolBase<T>::push(TaskType *task)
 {
   int ret = OB_SUCCESS;
+  size_t operation_token = 0;
   if (!is_inited_) {
     ret = OB_NOT_INIT;
   } else if (NULL == task) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (!enter_operation()) {
+  } else if (!enter_operation(operation_token)) {
     ret = OB_IN_STOP_STATE;
   } else {
     ret = queue_.push(task);
@@ -105,38 +106,32 @@ int ObSimpleThreadPoolBase<T>::push(TaskType *task)
     if (this->idle_count() == 0) {
       this->try_expand_one(max_thread_cnt_);
     }
-    leave_operation();
+    leave_operation(operation_token);
   }
   return ret;
 }
 
 template <class T>
-bool ObSimpleThreadPoolBase<T>::enter_operation()
+bool ObSimpleThreadPoolBase<T>::enter_operation(size_t &token)
 {
-  uint64_t state = lifecycle_.load(std::memory_order_acquire);
-  while ((state & STOPPED) == 0) {
-    if (lifecycle_.compare_exchange_weak(state, state + 1,
-        std::memory_order_acq_rel, std::memory_order_acquire)) {
-      return true;
-    }
-  }
-  return false;
+  return lifecycle_.enter(static_cast<size_t>(get_itid()), token);
 }
 
 template <class T>
-void ObSimpleThreadPoolBase<T>::leave_operation()
+void ObSimpleThreadPoolBase<T>::leave_operation(size_t token)
 {
-  lifecycle_.fetch_sub(1, std::memory_order_release);
+  lifecycle_.leave(token);
 }
 
 template <class T>
 bool ObSimpleThreadPoolBase<T>::try_expand_one(int64_t limit)
 {
   bool expanded = false;
-  if (this->worker_count() < limit && enter_operation()) {
+  size_t operation_token = 0;
+  if (this->worker_count() < limit && enter_operation(operation_token)) {
     expanded = lib::ObAdaptiveWorkerPool<ObSimpleThreadPoolBase<T>>::try_expand_one(
         limit, [this]() { return has_set_stop(); });
-    leave_operation();
+    leave_operation(operation_token);
   }
   return expanded;
 }
@@ -223,7 +218,7 @@ int ObSimpleThreadPoolBase<T>::set_thread_count(int64_t n_threads)
 template <class T>
 void ObSimpleThreadPoolBase<T>::stop()
 {
-  lifecycle_.fetch_or(STOPPED, std::memory_order_acq_rel);
+  lifecycle_.close();
   notify_stop();
   lib::ObMutexGuard g(workers_lock_);
   DLIST_FOREACH_NORET(wnode, workers_) {
@@ -236,7 +231,7 @@ void ObSimpleThreadPoolBase<T>::wait()
 {
   // The manager also takes workers_lock_, so unbind without holding it.
   IGNORE_RETURN ObSimpleThreadPoolDynamicMgr::get_instance().unbind(this);
-  while ((lifecycle_.load(std::memory_order_acquire) & ACTIVE_OPERATIONS) != 0) {
+  while (!lifecycle_.drained()) {
     ob_usleep(1000);
   }
   WorkerList workers;

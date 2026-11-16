@@ -22,6 +22,8 @@
 #include "lib/thread/thread_pool.h"
 #include "lib/thread/ob_dynamic_thread_pool.h"
 #include "lib/thread/ob_adaptive_worker_pool.h"
+#include "lib/thread/operation_gate.h"
+#include "lib/thread_local/ob_tsi_utils.h"
 #include "lib/thread/ob_link_task.h"
 #include "lib/list/ob_dlist.h"
 #include "lib/lock/ob_mutex.h"
@@ -53,8 +55,6 @@ class ObSimpleThreadPoolBase
   using QElemType = typename QueueTypeMap<T>::QElemType;
   static const int64_t QUEUE_WAIT_TIME = 1000 * 1000;
   static const int64_t SHRINK_TIMEOUT_US = 1 * 1000 * 1000;
-  static constexpr uint64_t STOPPED = uint64_t{1} << 63;
-  static constexpr uint64_t ACTIVE_OPERATIONS = STOPPED - 1;
 
   struct Worker;
   using WorkerNode = common::ObDLinkNode<Worker *>;
@@ -90,7 +90,7 @@ public:
   // destroy/init must not overlap invocations from the previous lifetime.
   void stop();
   void wait();
-  bool has_set_stop() const { return (lifecycle_.load(std::memory_order_acquire) & STOPPED) != 0; }
+  bool has_set_stop() const { return lifecycle_.stopped(); }
 
   // RunWrapper
   void set_run_wrapper(lib::IRunWrapper *rw) { run_wrapper_ = rw; }
@@ -120,12 +120,12 @@ protected:
   virtual void run1();
 
 private:
-  bool enter_operation();
-  void leave_operation();
+  bool enter_operation(size_t &token);
+  void leave_operation(size_t token);
   void destroy_workers(WorkerList &workers);
 
   std::atomic<bool> is_inited_;
-  std::atomic<uint64_t> lifecycle_;
+  OperationGate<64> lifecycle_;
   T queue_;
   lib::IRunWrapper *run_wrapper_;
   WorkerList workers_;
